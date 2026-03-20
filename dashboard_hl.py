@@ -193,6 +193,7 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size:
         "position_size": round(position_size, 4),
         "risk_amount": round(risk_amount, 0),
         "atr": round(atr_val, 2),
+        "rr_ratio": rr_ratio,  
         "signals": signals[:8],
         "account_size": account_size
     }
