@@ -404,3 +404,24 @@ with col_b:
         ]
     }
     st.dataframe(pd.DataFrame(ema_data), hide_index=True, use_container_width=True)
+
+# ─── BUCLE MULTIALERTA PARA EL BOT DE TELEGRAM ────────────────────────────────────────────────────────
+st.divider()
+st.caption("🔍 Escaneando alertas en segundo plano: BTC · ETH · SOL · HYPE")
+
+WATCH_LIST = ["BTC", "ETH", "SOL", "HYPE"]
+for watch_coin in WATCH_LIST:
+    if watch_coin == COIN:
+        continue  # el activo principal ya lo hemos analizado arriba
+    try:
+        df_w  = get_candles(watch_coin, "1h", 240)
+        ctx_w = get_market_context(watch_coin)
+        an_w  = analyze_signals(df_w, ctx_w, df_w["close"], account_size)
+        alert_key = f"last_alert_{watch_coin}"
+        if an_w["strength"] >= ALERT_THRESHOLD and an_w["strength"] != st.session_state.get(alert_key, 0):
+            send_telegram(build_alert_message(watch_coin, an_w))
+            st.session_state[alert_key] = an_w["strength"]
+            st.toast(f"📬 Alerta {watch_coin} — {an_w['direction']}", icon="🚨")
+    except:
+        pass
+
