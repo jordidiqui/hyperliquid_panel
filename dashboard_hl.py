@@ -6,6 +6,34 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import streamlit as st
+import threading
+
+TELEGRAM_TOKEN   = st.secrets.get("TELEGRAM_TOKEN", "")   # desde secrets de Streamlit Cloud
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+
+def send_telegram(message: str):
+    """Envía alerta a Telegram de forma asíncrona (no bloquea el dashboard)"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    def _send():
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+    threading.Thread(target=_send).start()
+
+def build_alert_message(coin: str, analysis: dict) -> str:
+    direction_emoji = "🟢" if "LONG" in analysis["direction"] else "🔴"
+    return (
+        f"*🚨 SEÑAL FUERTE — Hyperliquid*\n"
+        f"{direction_emoji} *{analysis['direction']}* en *{coin}/USDC*\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📊 Fuerza: *{analysis['strength']}/100*\n"
+        f"💰 Precio: `${analysis.get('mark_price', 0):,.2f}`\n"
+        f"📐 Leverage sugerido: *{analysis['leverage']}*\n"
+        f"🛑 SL: `${analysis['sl_price']:,.2f}`\n"
+        f"🎯 TP: `${analysis['tp_price']:,.2f}`\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📡 {' · '.join(analysis['signals'][:4])}"
+    )
 
 HL_URL = "https://api.hyperliquid.xyz/info"
 
@@ -311,6 +339,19 @@ st.plotly_chart(build_chart(df, COIN), use_container_width=True)
 # ─── ANALIZADOR CON GESTIÓN DE RIESGO ─────────────────────────────────────────
 analysis = analyze_signals(df, ctx, close, account_size)
 
+# ─── ALERTA TELEGRAM ──────────────────────────────────────────────────────────
+ALERT_THRESHOLD = 70
+
+alert_key = f"last_alert_{COIN}"
+last_strength = st.session_state.get(alert_key, 0)
+
+if analysis["strength"] >= ALERT_THRESHOLD and analysis["strength"] != last_strength:
+    msg = build_alert_message(COIN, analysis)
+    send_telegram(msg)
+    st.session_state[alert_key] = analysis["strength"]
+    st.toast(f"📬 Alerta Telegram enviada — {analysis['direction']}", icon="🚨")
+
+# ─── ANALIZADOR CON GESTIÓN DE RIESGO ─────────────────────────────────────────
 st.subheader("🤖 ANALIZADOR + GESTIÓN DE RIESGO")
 col1, col2, col3 = st.columns([1,1,2])
 
