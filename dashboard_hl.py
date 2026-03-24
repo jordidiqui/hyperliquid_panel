@@ -117,6 +117,11 @@ def calc_volume(df: pd.DataFrame):
 
 # ─── ANÁLISIS ─────────────────────────────────────────────────────────────
 
+def analyze_signals(df, ctx, close, account_size=10000, sl_mult=2.0, rr=2.0):
+    ...
+    sl_distance = atr_val * sl_mult      # usa el tuyo
+    tp_distance = sl_distance * rr       # usa el tuyo
+
 def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size: float = 10000) -> dict:
     """Analizador con gestión de riesgo completa"""
     price = close.iloc[-1]
@@ -180,17 +185,17 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size:
     
     # Leverage y riesgo según puntuación
     if strength >= 80:
-        leverage = "10x", 0.02  # 2% riesgo
+        leverage = "40x", 0.30  # 30% riesgo
         sl_mult  = 1.5
         rr_ratio = 3.0
         emoji, label = "🚀", "MUY FUERTE"
     elif strength >= 60:
-        leverage = "5x", 0.01   # 1% riesgo
+        leverage = "10x", 0.10   # 10% riesgo
         sl_mult  = 2.0
         rr_ratio = 2.0
         emoji, label = "✅", "BUENA"
     elif strength >= 40:
-        leverage = "3x", 0.005  # 0.5% riesgo
+        leverage = "3x", 0.05  # 5% riesgo
         sl_mult  = 2.5
         rr_ratio = 1.5
         emoji, label = "⚠️", "DÉBIL"
@@ -307,6 +312,10 @@ with st.sidebar:
     account_size = st.number_input("Tamaño cuenta (USDC)", min_value=1000, max_value=1000000, value=10000, step=1000)
     refresh_btn  = st.button("🔄 Actualizar ahora", use_container_width=True)
     st.caption(f"Última actualización: {datetime.now().strftime('%H:%M:%S')}")
+    st.divider()
+    st.subheader("🎯 Gestión de riesgo manual")
+    sl_atr_mult = st.slider("Multiplicador SL (ATR)", 0.5, 4.0, 2.0, 0.25)
+    rr_ratio_manual = st.slider("Ratio TP/SL (RR)", 1.0, 5.0, 2.0, 0.5)
 
 # Auto-refresh
 if auto_refresh:
