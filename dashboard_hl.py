@@ -150,8 +150,10 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size:
     
     if price > ema20.iloc[-1]: score_long += 10; signals.append("EMA20 ✅")
     else: score_short += 10; signals.append("EMA20 ❌")
-    if price > ema50.iloc[-1]: score_long += 15; signals.append("EMA50 ✅")
+    if price > ema50.iloc[-1]: score_long += 10; signals.append("EMA50 ✅")
     else: score_short += 15; signals.append("EMA50 ❌")
+    if price > ema200.iloc[-1]: score_long += 8   # era parte del bloque general
+    else: score_short += 8
     
     if pct_b < 20: 
         score_long += 15; signals.append("BB: zona rebote")
@@ -165,6 +167,12 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size:
         score_long += 15; signals.append("Funding longs")
     elif funding > 0.01:
         score_short += 15; signals.append("Funding shorts")
+
+    # Añade una bonificación si RSI y MACD apuntan en la misma dirección
+    if (rsi_now > 50 and macd_now > 0) or (rsi_now < 50 and macd_now < 0):
+        score_long += 10 if macd_now > 0 else 0
+        score_short += 10 if macd_now < 0 else 0
+
     
     # GESTIÓN DE RIESGO
     direction = "🟢 LONG" if score_long > score_short else ("🔴 SHORT" if score_short > score_long else "🟡 NEUTRAL")
