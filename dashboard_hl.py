@@ -93,7 +93,6 @@ def calc_volume(df: pd.DataFrame):
 
 def analyze_signals(df, ctx, close, account_size=10000, sl_mult=2.0, rr=2.0):
     ...
-    candle_time = df.index[-1].isoformat()
     sl_distance = atr_val * sl_mult      # usa el tuyo
     tp_distance = sl_distance * rr       # usa el tuyo
     
