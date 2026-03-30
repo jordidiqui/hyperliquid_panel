@@ -211,7 +211,6 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series, account_size:
         "rr_ratio": rr_ratio,  
         "signals": signals[:8],
         "account_size": account_size
-        "candle_time": candle_time,  
     }
 
 # ─── GRÁFICO PRINCIPAL ────────────────────────────────────────────────────────
