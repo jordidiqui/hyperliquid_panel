@@ -9,48 +9,6 @@ from datetime import datetime, timedelta
 import streamlit as st
 import threading
 
-TELEGRAM_TOKEN   = st.secrets.get("TELEGRAM_TOKEN", "")   # desde secrets de Streamlit Cloud
-TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
-
-ALERT_STATE_FILE = "alert_state.json"
-
-def load_alert_state():
-    if os.path.exists(ALERT_STATE_FILE):
-        with open(ALERT_STATE_FILE) as f:
-            try:
-                return json.load(f)
-            except:
-                return {}
-    return {}
-
-def save_alert_state(state: dict):
-    with open(ALERT_STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-def send_telegram(message: str):
-    """Envía alerta a Telegram de forma asíncrona (no bloquea el dashboard)"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    def _send():
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
-    threading.Thread(target=_send).start()
-
-def build_alert_message(coin: str, analysis: dict) -> str:
-    direction_emoji = "🟢" if "LONG" in analysis["direction"] else "🔴"
-    return (
-        f"*🚨 SEÑAL FUERTE — Hyperliquid*\n"
-        f"{direction_emoji} *{analysis['direction']}* en *{coin}/USDC*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"📊 Fuerza: *{analysis['strength']}/100*\n"
-        f"💰 Precio: `${analysis.get('mark_price', 0):,.2f}`\n"
-        f"📐 Leverage sugerido: *{analysis['leverage']}*\n"
-        f"🛑 SL: `${analysis['sl_price']:,.2f}`\n"
-        f"🎯 TP: `${analysis['tp_price']:,.2f}`\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"📡 {' · '.join(analysis['signals'][:4])}"
-    )
-
 HL_URL = "https://api.hyperliquid.xyz/info"
 
 # ─── CONFIG PÁGINA ────────────────────────────────────────────────────────────
@@ -373,30 +331,6 @@ st.plotly_chart(build_chart(df, COIN), use_container_width=True)
 
 # ─── ANALIZADOR CON GESTIÓN DE RIESGO ─────────────────────────────────────────
 analysis = analyze_signals(df, ctx, close, account_size)
-
-# ─── ALERTA TELEGRAM ──────────────────────────────────────────────────────────
-ALERT_THRESHOLD = 70
-
-alert_state = load_alert_state()
-key = f"{COIN}_{INTERVAL}"
-last_id = alert_state.get(key)
-
-cur_id = f"{analysis['direction']}_{analysis['strength']}_{analysis['candle_time']}"
-
-if analysis["strength"] >= ALERT_THRESHOLD and analysis["direction"] != "🟡 NEUTRAL":
-    if cur_id != last_id:
-        msg = build_alert_message(COIN, analysis)
-        send_telegram(msg)
-        alert_state[key] = cur_id
-        save_alert_state(alert_state)
-        st.toast(f"📬 Alerta Telegram enviada — {analysis['direction']}", icon="🚨")
-else:
-    # si baja de fuerza, limpiamos estado para permitir futuras señales
-    if last_id is not None:
-        alert_state.pop(key, None)
-        save_alert_state(alert_state)
-
-# ─── ANALIZADOR CON GESTIÓN DE RIESGO ─────────────────────────────────────────
 st.subheader("🤖 ANALIZADOR + GESTIÓN DE RIESGO")
 col1, col2, col3 = st.columns([1,1,2])
 
@@ -449,42 +383,3 @@ with col_b:
         ]
     }
     st.dataframe(pd.DataFrame(ema_data), hide_index=True, use_container_width=True)
-
-# ─── BUCLE MULTIALERTA PARA EL BOT DE TELEGRAM ────────────────────────────────────────────────────────
-st.divider()
-st.caption("🔍 Escaneando alertas en segundo plano: BTC · ETH · SOL · HYPE")
-
-WATCH_LIST = ["BTC", "ETH", "SOL", "HYPE"]
-alert_state = load_alert_state()
-
-for watch_coin in WATCH_LIST:
-    if watch_coin == COIN:
-        continue  # el activo principal ya lo hemos analizado arriba
-    try:
-        # Si quieres que el escáner trabaje SIEMPRE en 1h, deja "1h"
-        # Si quieres que siga el intervalo del panel, usa INTERVAL
-        scan_interval = "1h"
-
-        df_w  = get_candles(watch_coin, scan_interval, 240)
-        ctx_w = get_market_context(watch_coin)
-        an_w  = analyze_signals(df_w, ctx_w, df_w["close"], account_size)
-
-        key = f"{watch_coin}_{scan_interval}"
-        last_id = alert_state.get(key)
-        cur_id = f"{an_w['direction']}_{an_w['strength']}_{an_w['candle_time']}"
-
-        if an_w["strength"] >= ALERT_THRESHOLD and an_w["direction"] != "🟡 NEUTRAL":
-            if cur_id != last_id:
-                send_telegram(build_alert_message(watch_coin, an_w))
-                alert_state[key] = cur_id
-                save_alert_state(alert_state)
-                st.toast(f"📬 Alerta {watch_coin} — {an_w['direction']}", icon="🚨")
-        else:
-            if last_id is not None:
-                alert_state.pop(key, None)
-                save_alert_state(alert_state)
-    except Exception as e:
-        # opcional: loguear el error
-        print(f"Error escaneando {watch_coin}: {e}")
-        continue
-
