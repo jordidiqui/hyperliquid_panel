@@ -227,6 +227,131 @@ def calc_support_resistance(df: pd.DataFrame, atr: float, n_levels=5) -> dict:
         "dist_sup_atr":   round(dist_sup_atr, 2) if dist_sup_atr else None,
     }
 
+# ─── LIQUIDACIONES SINTÉTICAS ────────────────────────────────────────────────
+
+def calc_liquidation_levels(df: pd.DataFrame, ctx: dict, atr: float, n_levels=4) -> dict:
+    """
+    Estima zonas de alta concentración de liquidaciones usando matemática pura.
+
+    Lógica:
+    - Para cada vela del historial reciente (últimas 72h), el volumen es un proxy
+      de cuántas posiciones se abrieron a ese precio.
+    - Para cada nivel de leverage típico, calculamos el precio de liquidación
+      de longs y shorts abiertos en cada vela.
+    - Ponderamos por volumen y recencia.
+    - Agrupamos los niveles resultantes (clustering por 0.5 ATR).
+
+    Distribución de leverage asumida (típica en Hyperliquid BTC):
+        5x  → 15%  de posiciones
+        10x → 30%
+        20x → 25%
+        25x → 15%
+        50x → 10%
+       100x →  5%
+    """
+    price    = df["close"].iloc[-1]
+    oi_usd   = ctx.get("open_interest_usd", 0)
+    cluster_dist = atr * 0.6
+
+    LEVERAGE_DIST = [(5, 0.15), (10, 0.30), (20, 0.25), (25, 0.15), (50, 0.10), (100, 0.05)]
+
+    # Ventana: últimas 72 velas (72h en 1h)
+    window = df.tail(72).copy()
+    if len(window) == 0:
+        return {"liq_longs": [], "liq_shorts": [], "nearest_liq_long": None, "nearest_liq_short": None}
+
+    # Normalizar volumen como peso (0→1)
+    vol_total = window["volume"].sum()
+    window["vol_weight"] = window["volume"] / vol_total if vol_total > 0 else 1 / len(window)
+
+    # Recencia: velas más recientes pesan más (decay exponencial)
+    n = len(window)
+    window["recency_w"] = np.exp(np.linspace(-2, 0, n))
+    window["recency_w"] /= window["recency_w"].sum()
+
+    # Peso combinado
+    window["weight"] = window["vol_weight"] * 0.6 + window["recency_w"] * 0.4
+
+    # Calcular todos los precios de liquidación
+    raw_liq_longs  = []  # liquidaciones de longs (precio baja hasta aquí)
+    raw_liq_shorts = []  # liquidaciones de shorts (precio sube hasta aquí)
+
+    for _, row in window.iterrows():
+        entry = row["close"]
+        w     = row["weight"]
+        for leverage, lev_weight in LEVERAGE_DIST:
+            # Long: liquidado cuando precio cae (1/leverage) desde entrada
+            # Fórmula simplificada (sin fees): liq = entry * (1 - 0.9/leverage)
+            # Factor 0.9 = margen de mantenimiento típico del 90% del margen inicial
+            liq_long  = entry * (1 - 0.9 / leverage)
+            liq_short = entry * (1 + 0.9 / leverage)
+            combined_w = w * lev_weight
+            raw_liq_longs.append((liq_long,  combined_w))
+            raw_liq_shorts.append((liq_short, combined_w))
+
+    def cluster_liq(raw, cluster_dist, above_price=True):
+        """Agrupa precios de liquidación cercanos y suma sus pesos."""
+        if not raw:
+            return []
+        # Filtrar por lado correcto
+        if above_price:
+            raw = [(p, w) for p, w in raw if p > price]
+        else:
+            raw = [(p, w) for p, w in raw if p < price]
+        if not raw:
+            return []
+
+        raw = sorted(raw, key=lambda x: x[0])
+        clustered = []
+        group_prices = [raw[0][0]]
+        group_weight = raw[0][1]
+
+        for p, w in raw[1:]:
+            if abs(p - np.mean(group_prices)) <= cluster_dist:
+                group_prices.append(p)
+                group_weight += w
+            else:
+                clustered.append({
+                    "price":  round(np.mean(group_prices), 2),
+                    "weight": round(group_weight, 4),
+                })
+                group_prices = [p]
+                group_weight = w
+        clustered.append({
+            "price":  round(np.mean(group_prices), 2),
+            "weight": round(group_weight, 4),
+        })
+        # Ordenar por peso descendente (zonas con más liquidez primero)
+        return sorted(clustered, key=lambda x: x["weight"], reverse=True)[:n_levels]
+
+    liq_longs_clustered  = cluster_liq(raw_liq_longs,  cluster_dist, above_price=False)
+    liq_shorts_clustered = cluster_liq(raw_liq_shorts, cluster_dist, above_price=True)
+
+    # Nivel más cercano de cada tipo
+    longs_below  = sorted([l for l in liq_longs_clustered  if l["price"] < price],
+                           key=lambda x: x["price"], reverse=True)
+    shorts_above = sorted([l for l in liq_shorts_clustered if l["price"] > price],
+                           key=lambda x: x["price"])
+
+    nearest_liq_long  = longs_below[0]["price"]  if longs_below  else None
+    nearest_liq_short = shorts_above[0]["price"] if shorts_above else None
+
+    dist_long_atr  = (price - nearest_liq_long)  / atr if nearest_liq_long  else None
+    dist_short_atr = (nearest_liq_short - price) / atr if nearest_liq_short else None
+    dist_long_pct  = (price / nearest_liq_long  - 1) * 100 if nearest_liq_long  else None
+    dist_short_pct = (nearest_liq_short / price - 1) * 100 if nearest_liq_short else None
+
+    return {
+        "liq_longs":        liq_longs_clustered,   # donde se liquidan longs (por debajo)
+        "liq_shorts":       liq_shorts_clustered,  # donde se liquidan shorts (por encima)
+        "nearest_liq_long":  nearest_liq_long,
+        "nearest_liq_short": nearest_liq_short,
+        "dist_long_atr":    round(dist_long_atr,  2) if dist_long_atr  else None,
+        "dist_short_atr":   round(dist_short_atr, 2) if dist_short_atr else None,
+        "dist_long_pct":    round(dist_long_pct,  2) if dist_long_pct  else None,
+        "dist_short_pct":   round(dist_short_pct, 2) if dist_short_pct else None,
+    }
+
 # ─── ANÁLISIS PRINCIPAL (PESOS DINÁMICOS) ────────────────────────────────────
 
 def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series,
@@ -242,9 +367,10 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series,
     funding  = ctx.get("funding_rate", 0)
     atr_val  = calc_atr(df)
 
-    # ── Régimen y S/R ────────────────────────────────────────────────────────
+    # ── Régimen, S/R y liquidaciones sintéticas ─────────────────────────────
     regime  = detect_regime(df, close)
     sr      = calc_support_resistance(df, atr_val)
+    liq     = calc_liquidation_levels(df, ctx, atr_val)
 
     is_range = regime["regime"] == "RANGE"
 
@@ -333,15 +459,26 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series,
     # ── Bonus S/R: precio cerca de nivel clave ────────────────────────────────
     sr_signal = None
     if sr["dist_sup_atr"] is not None and sr["dist_sup_atr"] <= 1.5:
-        # Muy cerca de soporte → refuerza long si otros indicadores apuntan arriba
         score_long  += 15
         sr_signal    = f"📍 Soporte en ${sr['nearest_sup']:,.0f} ({sr['dist_sup_atr']:.1f} ATR)"
         signals.append(sr_signal)
     if sr["dist_res_atr"] is not None and sr["dist_res_atr"] <= 1.5:
-        # Muy cerca de resistencia → refuerza short
         score_short += 15
         sr_signal    = f"🚧 Resist. en ${sr['nearest_res']:,.0f} ({sr['dist_res_atr']:.1f} ATR)"
         signals.append(sr_signal)
+
+    # ── Bonus liquidaciones sintéticas ────────────────────────────────────────
+    # Longs bajo el precio: si el precio se acerca, riesgo de cascada bajista
+    # → precio "cazando" stops de longs → señal bajista
+    if liq["dist_long_atr"] is not None and liq["dist_long_atr"] <= 1.2:
+        score_short += 18
+        signals.append(f"💥 Zona liq. longs en ${liq['nearest_liq_long']:,.0f} ({liq['dist_long_atr']:.1f} ATR)")
+
+    # Shorts sobre el precio: si el precio se acerca, potencial squeeze alcista
+    # → precio "cazando" stops de shorts → señal alcista
+    if liq["dist_short_atr"] is not None and liq["dist_short_atr"] <= 1.2:
+        score_long  += 18
+        signals.append(f"🎯 Zona liq. shorts en ${liq['nearest_liq_short']:,.0f} ({liq['dist_short_atr']:.1f} ATR)")
 
     # ── Resultado ─────────────────────────────────────────────────────────────
     direction = ("🟢 LONG" if score_long > score_short
@@ -376,12 +513,13 @@ def analyze_signals(df: pd.DataFrame, ctx: dict, close: pd.Series,
         "account_size": account_size,
         "regime": regime,
         "sr": sr,
+        "liq": liq,
         "score_long": score_long, "score_short": score_short,
     }
 
 # ─── GRÁFICO PRINCIPAL ────────────────────────────────────────────────────────
 
-def build_chart(df: pd.DataFrame, coin: str, sr: dict) -> go.Figure:
+def build_chart(df: pd.DataFrame, coin: str, sr: dict, liq: dict) -> go.Figure:
     close        = df["close"]
     bb_u, bb_m, bb_l = calc_bb(close)
     ema20, ema50, ema200 = calc_emas(close)
@@ -419,6 +557,22 @@ def build_chart(df: pd.DataFrame, coin: str, sr: dict) -> go.Figure:
         fig.add_hline(y=lvl["price"], line=dict(color="#ef5350", width=1.2, dash="dot"),
                       annotation_text=f"R {lvl['price']:,.0f} ({lvl['touches']}t)",
                       annotation_font_color="#ef5350", annotation_position="right",
+                      row=1, col=1)
+
+    # ── Liquidaciones sintéticas en el gráfico ────────────────────────────────
+    # Longs bajo precio = líneas naranjas (si el precio las toca → cascada)
+    for lvl in liq.get("liq_longs", [])[:3]:
+        fig.add_hline(y=lvl["price"],
+                      line=dict(color="#FF8C00", width=1, dash="dashdot"),
+                      annotation_text=f"💥L {lvl['price']:,.0f}",
+                      annotation_font_color="#FF8C00", annotation_position="left",
+                      row=1, col=1)
+    # Shorts sobre precio = líneas amarillas (si el precio las toca → squeeze)
+    for lvl in liq.get("liq_shorts", [])[:3]:
+        fig.add_hline(y=lvl["price"],
+                      line=dict(color="#FFD700", width=1, dash="dashdot"),
+                      annotation_text=f"🎯S {lvl['price']:,.0f}",
+                      annotation_font_color="#FFD700", annotation_position="left",
                       row=1, col=1)
 
     # RSI
@@ -486,6 +640,7 @@ st.divider()
 analysis = analyze_signals(df, ctx, close, account_size)
 regime   = analysis["regime"]
 sr       = analysis["sr"]
+liq      = analysis["liq"]
 
 # ── Régimen + S/R en banner ───────────────────────────────────────────────────
 reg_col = "#26a69a" if regime["regime"]=="RANGE" else "#FFA500"
@@ -501,7 +656,7 @@ st.markdown(
 )
 
 # ── Gráfico ───────────────────────────────────────────────────────────────────
-st.plotly_chart(build_chart(df, COIN, sr), use_container_width=True)
+st.plotly_chart(build_chart(df, COIN, sr, liq), use_container_width=True)
 
 # ── Análisis + señal ──────────────────────────────────────────────────────────
 st.subheader("🤖 Señal + Gestión de Riesgo")
@@ -513,6 +668,56 @@ with col4:
     st.write("**Señales activas:**")
     for s in analysis["signals"][:6]:
         st.write(f"· {s}")
+
+# ── Liquidaciones sintéticas + S/R ───────────────────────────────────────────
+st.divider()
+st.subheader("💧 Mapa de Liquidaciones Sintético")
+
+# Banner de proximidad
+liq_alerts = []
+if liq["dist_short_atr"] is not None and liq["dist_short_atr"] <= 2.0:
+    liq_alerts.append(
+        f"🎯 **Squeeze alcista posible** — zona liquidación shorts a "
+        f"${liq['nearest_liq_short']:,.0f} ({liq['dist_short_atr']:.1f} ATR, {liq['dist_short_pct']:.2f}% arriba)"
+    )
+if liq["dist_long_atr"] is not None and liq["dist_long_atr"] <= 2.0:
+    liq_alerts.append(
+        f"💥 **Cascada bajista posible** — zona liquidación longs a "
+        f"${liq['nearest_liq_long']:,.0f} ({liq['dist_long_atr']:.1f} ATR, {liq['dist_long_pct']:.2f}% abajo)"
+    )
+if liq_alerts:
+    for alert in liq_alerts:
+        st.warning(alert)
+else:
+    st.info("Sin zonas de liquidación críticas en las próximas 2 ATR.")
+
+col_liq1, col_liq2 = st.columns(2)
+with col_liq1:
+    st.markdown("**🎯 Liquidaciones de shorts** *(squeeze alcista si el precio sube hasta aquí)*")
+    if liq["liq_shorts"]:
+        df_ls = pd.DataFrame(liq["liq_shorts"]).rename(columns={"price":"Precio","weight":"Peso relativo"})
+        df_ls["Dist %"] = ((df_ls["Precio"] / df["close"].iloc[-1] - 1) * 100).round(2).astype(str) + "%"
+        df_ls["Dist ATR"] = ((df_ls["Precio"] - df["close"].iloc[-1]) / atr_now).round(1)
+        df_ls["Peso relativo"] = df_ls["Peso relativo"].round(3)
+        st.dataframe(df_ls, hide_index=True, use_container_width=True)
+    else:
+        st.info("Sin niveles detectados.")
+
+with col_liq2:
+    st.markdown("**💥 Liquidaciones de longs** *(cascada si el precio cae hasta aquí)*")
+    if liq["liq_longs"]:
+        df_ll = pd.DataFrame(liq["liq_longs"]).rename(columns={"price":"Precio","weight":"Peso relativo"})
+        df_ll["Dist %"] = ((df["close"].iloc[-1] / df_ll["Precio"] - 1) * 100).round(2).astype(str) + "%"
+        df_ll["Dist ATR"] = ((df["close"].iloc[-1] - df_ll["Precio"]) / atr_now).round(1)
+        df_ll["Peso relativo"] = df_ll["Peso relativo"].round(3)
+        st.dataframe(df_ll, hide_index=True, use_container_width=True)
+    else:
+        st.info("Sin niveles detectados.")
+
+st.caption(
+    "⚠️ Estimación sintética basada en distribución de leverage típica (5x–100x) y volumen "
+    "por vela. No refleja posiciones reales individuales. Usar como referencia contextual."
+)
 
 # ── S/R tabla ─────────────────────────────────────────────────────────────────
 st.divider()
